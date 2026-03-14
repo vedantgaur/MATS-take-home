@@ -67,3 +67,34 @@ def plot_2d_pca(activations: np.ndarray, labels: np.ndarray, pca_model: PCA, pc_
     plt.ylabel(f"Principal Component {pc_y+1}")
     plt.grid(True, alpha=0.3)
     plt.show()
+
+def extract_all_layers(model: HookedTransformer, dataloader):
+    model.eval()
+    n_layers = model.cfg.n_layers
+    
+    all_acts = {i: [] for i in range(n_layers)}
+    all_labels = []
+    
+    hook_names = [f"blocks.{i}.hook_resid_post" for i in range(n_layers)]
+    
+    with torch.no_grad():
+        for batch_x, _, labels in dataloader:
+            batch_x = batch_x.to(model.cfg.device)
+            
+            _, cache = model.run_with_cache(batch_x, names_filter=hook_names)
+            
+            for i in range(n_layers):
+                # Shape is (batch_size, seq_len, d_model)
+                acts = cache[hook_names[i]].cpu().numpy()
+                
+                final_pos_acts = acts[:, -1, :]
+                all_acts[i].append(final_pos_acts)
+                
+            all_labels.append(labels.numpy())
+            
+    for i in range(n_layers):
+        all_acts[i] = np.vstack(all_acts[i])
+        
+    all_labels = np.concatenate(all_labels)
+    
+    return all_acts, all_labels
