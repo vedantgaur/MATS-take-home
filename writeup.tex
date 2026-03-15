@@ -1,0 +1,230 @@
+\documentclass[11pt]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage{amsmath, amssymb, amsthm}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{geometry}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{booktabs}
+
+\geometry{a4paper, margin=1in}
+
+\title{Simplex Stream Takehome: Geometric Representations of Non-Ergodic Processes}
+\author{Vedant Gaur}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Recent work has demonstrated that transformers trained via next-token prediction learn to factor their world into parts, representing concurrent, conditionally independent latent processes in orthogonal subspaces. I explore how these geometric inductive biases behave in a purely non-ergodic setting---where generative factors are mutually exclusive rather than concurrent. I trained a small decoder-only transformer on a mixture of three distinct Mess3 processes and analyzed the residual stream geometry. My pre-registered prediction favored orthogonal subspaces with explicit domain routing, but the empirical results reveal a more nuanced strategy: the model maintains \emph{simultaneous belief trajectories under all process hypotheses}---a soft Bayesian mixture rather than hard routing. A linear probe recovers these all-process belief states with $R^2 = 0.93$ at the first layer, while process classification remains near chance, demonstrating that the model solves the non-ergodic mixture implicitly through parallel belief tracking rather than explicit process identification.
+\end{abstract}
+
+\section{Introduction and Setup}
+
+I constructed a non-ergodic training dataset consisting of three distinct Mess3 processes. A single Mess3 process is a 3-state Hidden Markov Model emitting tokens from a ternary alphabet $\mathcal{X} = \{0,1,2\}$, parameterized by transition variables $\alpha$ and $x$, with dependent quantities $\beta = (1-\alpha)/2$ and $y = 1-2x$. The token-labeled transition matrices $T^{(0)}, T^{(1)}, T^{(2)}$ are defined as in Shai et al.\ (2026), Appendix C.1.1. To enforce non-ergodicity, each training sequence of length 16 was generated entirely from a single, uniformly sampled Mess3 process.
+
+I trained a 2-layer HookedTransformer ($d_\text{model}=64$, 4 heads, $d_\text{head}=16$, $d_\text{MLP}=256$) using standard next-token cross-entropy loss. The model was trained for 200 epochs on 50{,}000 samples with a batch size of 256 and learning rate $1 \times 10^{-3}$, converging to a final loss of 0.995 on a single T4 GPU.
+
+\section{Relevance to Language Models}
+
+The global training corpus of an LLM is highly non-ergodic: it contains mutually exclusive domains such as Python code, French literature, and mathematics. However, within a single context window, the generating process is typically fixed and ergodic. An LLM must therefore perform a dual-phase inference: first, rapidly identify the overarching domain from initial tokens (\emph{macroscopic routing}), then track the specific local state within that domain (\emph{microscopic state tracking}). A mixture of mutually exclusive Mess3 processes isolates this exact dual-phase challenge in a controlled, analytically tractable setting.
+
+\section{Pre-Registered Predictions}
+
+\subsection{Mathematical Derivation of the State Space}
+Let $\mathcal{S}_k$ represent the set of hidden states for the $k$-th Mess3 process. Each process is a 3-state HMM whose predictive vector (belief state) lives in a 2-simplex spanning 2 dimensions.
+
+In the concurrent factor setting of Shai et al., the joint latent space is the tensor product of constituent spaces. In contrast, my non-ergodic process dictates that components never co-occur. The global latent space is the disjoint union:
+\begin{equation}
+    \mathcal{S}_{\text{global}} = \bigsqcup_{k=1}^{3} \mathcal{S}_k
+\end{equation}
+The global belief state is a joint distribution over both the active process $k$ and hidden state $s$:
+\begin{equation}
+    \eta_{\text{global}} = P(\text{process } k, \text{state } s)
+\end{equation}
+This spans $3 \times 3 = 9$ mutually exclusive states, so the global predictive vector lives in the 8-simplex $\Delta^8$, requiring at most $9 - 1 = 8$ dimensions.
+
+\paragraph{Why the Factored World Hypothesis does not apply.}
+Shai et al.\ define conditional independence as the property that each token-labeled transition operator decomposes as a tensor product: $T^{(x)} = \bigotimes_n T_n^{(x)}$ (Definition~2.1). In the non-ergodic mixture, the natural factorization of the 9-dimensional joint latent space is into a ``process identity'' factor ($k \in \{1,2,3\}$) and a ``hidden state'' factor ($s \in \{1,2,3\}$). The joint transition operator is block-diagonal with process-dependent blocks:
+\begin{equation}
+    T^{(x)}_{(k,s),(k',s')} = \delta_{kk'} \cdot T_k^{(x)}(s, s')
+\end{equation}
+For this to admit a tensor product decomposition $T^{(x)} = A^{(x)} \otimes B^{(x)}$, the matrix $A^{(x)}$ must be diagonal (since process identity is conserved), which forces every block $T_k^{(x)}$ to be a scalar multiple of a single common matrix $B^{(x)}$. But distinct Mess3 processes have genuinely different transition dynamics ($T_1^{(x)} \neq T_2^{(x)} \neq T_3^{(x)}$), so the factorization fails. Observing a token simultaneously updates both the process posterior $P(k \mid x_{1:\ell})$ and the within-process belief $\eta_k$, coupling the two factors. By the analysis in Section~2.4 of Shai et al., the factored representation is therefore lossy, and the model has no information-theoretic incentive to fully orthogonalize the factor subspaces. This is the formal reason to expect the non-ergodic mixture to resist the clean factored geometry observed for concurrent, conditionally independent processes.
+
+\subsection{Alternative Geometric Hypotheses}
+I considered three architectures the model could adopt:
+\begin{itemize}
+    \item \textit{Flat 8-Simplex:} All 9 states represented as a flat categorical distribution with no hierarchical structure.
+    \item \textit{Dimensional Reuse (Superposition):} The three processes share the same 2-dimensional plane, superimposing their simplices to maximize dimensional efficiency.
+    \item \textit{Orthogonal Subspaces:} Distinct, mutually orthogonal 2-simplices per process, separated by a global routing vector.
+\end{itemize}
+
+\subsection{Geometric Intuition and Dynamics}
+My intuition favored orthogonal subspaces: 2 dimensions for a macroscopic categorical distribution over processes, and 6 dimensions for three orthogonal 2-simplices. I expected:
+\begin{itemize}
+    \item \textit{Across context position:} Activations collapse near a global center of mass at $l=0$ and progressively separate into process-specific clusters.
+    \item \textit{Across layers:} Early layers solve routing; later layers refine belief geometry.
+\end{itemize}
+
+\section{Residual Stream Geometry Analysis}
+
+To test these predictions, I extracted residual stream activations at the final sequence position across a 2{,}000-sample validation set.
+
+%% FIGURE 1: Save from Colab:
+%%   (a) = the training loss plot from Cell 6
+%%   (b) = the CEV subplot (left panel) from the LAYER 1 output of Cell 8
+\begin{figure}[h]
+    \centering
+    \begin{subfigure}{0.48\textwidth}
+        \includegraphics[width=\textwidth]{loss.png}
+        \caption{Cross-entropy loss over 200 epochs}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}{0.48\textwidth}
+        \includegraphics[width=\textwidth]{cev.png}
+        \caption{Cumulative Explained Variance (Layer 1)}
+    \end{subfigure}
+    \caption{Training dynamics and effective dimensionality. The model converges to a loss of 0.995, well below the uniform entropy $\log 3 \approx 1.099$. (b) shows the CEV for Layer~1 (the final layer), which requires 28 dimensions for 95\% variance---above the theoretical 8-dimensional bound, but reduced from 37 at Layer~0.}
+    \label{fig:loss_cev}
+\end{figure}
+
+The loss curve (Figure~\ref{fig:loss_cev}a) confirms the model learns non-trivial Markov structure. The CEV analysis (Figure~\ref{fig:loss_cev}b) shows the final layer requires 28 dimensions for 95\% variance, still well above the theoretical 8-dimensional bound. This indicates the model has not yet fully compressed to the optimal geometry.
+
+%% FIGURE 2: Save from Colab:
+%%   (a) = PC1 vs PC2 panel (middle) from the LAYER 1 output of Cell 8
+%%   (b) = PC3 vs PC4 panel (right) from the LAYER 1 output of Cell 8
+\begin{figure}[h]
+    \centering
+    \begin{subfigure}{0.48\textwidth}
+        \includegraphics[width=\textwidth]{pca_pc1_pc2.png}
+        \caption{Macroscopic geometry (PC1 vs PC2)}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}{0.48\textwidth}
+        \includegraphics[width=\textwidth]{pca_pc3_pc4.png}
+        \caption{Microscopic geometry (PC3 vs PC4)}
+    \end{subfigure}
+    \caption{PCA projections of Layer~1 residual stream at the final sequence position, colored by generative process ID.}
+    \label{fig:pca_geom}
+\end{figure}
+
+PCA projections (Figure~\ref{fig:pca_geom}) reveal that Process~3 ($x=0.50$, $y=0$) separates macroscopically in PC1--PC2, while Processes~1 and 2---which share similar dynamics ($x \in \{0.11, 0.15\}$)---remain largely overlapping. The microscopic geometry (PC3--PC4) does not yet show crisp 2-simplex structure.
+
+\subsection{Context Position Evolution}
+
+%% FIGURE 3: Save from Colab:
+%%   The 4-panel horizontal strip from Cell 10
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=\textwidth]{context_pos.png}
+    \caption{Activation geometry evolution across the context window ($l=1, 4, 8, 15$), projected onto the Layer~1 PCA basis.}
+    \label{fig:context_evo}
+\end{figure}
+
+As predicted, early positions show a collapsed geometry near a global center of mass (Figure~\ref{fig:context_evo}, $l=1$). As context accumulates, the representations progressively separate into process-specific clusters, confirming that the model actively separates generative domains as evidence accrues.
+
+\subsection{Linear Probes: Belief States and Process Identification}
+
+To determine what the model \emph{actually} represents, I constructed probe targets that reflect what a Bayes-optimal predictor must maintain. For a non-ergodic mixture, the optimal next-token distribution is:
+\begin{equation}
+    P(x_{\ell+1} \mid x_{1:\ell}) = \sum_{k=1}^{3} P(k \mid x_{1:\ell}) \cdot P(x_{\ell+1} \mid x_{1:\ell}, \text{process } k)
+\end{equation}
+where $P(x_{\ell+1} \mid x_{1:\ell}, k)$ depends on $\eta_k(x_{1:\ell})$---the belief state obtained by running the HMM forward algorithm under process $k$'s transition dynamics on the observed tokens, \emph{regardless of which process actually generated the data}. I computed $\eta_k(x_{1:\ell})$ for all three processes on every validation sequence, yielding a 9-dimensional target $[\eta_1, \eta_2, \eta_3]$. I also computed the Bayesian posterior $P(k \mid x_{1:\ell})$ via cumulative log-likelihoods with a uniform prior.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lcc}
+\toprule
+\textbf{Probe} & \textbf{Layer 0} & \textbf{Layer 1} \\
+\midrule
+Belief State $R^2$ (all-process) & \textbf{0.929} & 0.633 \\
+Process Classification Accuracy & 0.393 & 0.460 \\
+\midrule
+Random baseline $R^2$ & \multicolumn{2}{c}{$-0.047$} \\
+Chance classification & \multicolumn{2}{c}{0.333} \\
+\bottomrule
+\end{tabular}
+\caption{Per-layer probing results. Layer~0 achieves remarkably high belief $R^2$ while process classification remains near chance at both layers.}
+\label{tab:probes}
+\end{table}
+
+The results (Table~\ref{tab:probes}) overturn my pre-registered prediction in a revealing way:
+
+\begin{enumerate}
+    \item \textbf{Belief tracking is strong; routing is weak.} The linear probe recovers all-process belief states with $R^2 = 0.929$ at Layer~0 and $0.633$ at Layer~1. Meanwhile, process classification barely exceeds chance (0.46 vs.\ 0.33). The model tracks belief states under all three process hypotheses simultaneously without explicitly identifying the active process. The per-process breakdown at Layer~1 ($R^2_{\text{P1}} = 0.672$, $R^2_{\text{P2}} = 0.655$, $R^2_{\text{P3}} = 0.571$) shows that Process~3 is the hardest to probe despite having the most distinctive dynamics ($y=0$). This is consistent with the overlap data: because P3 is the most geometrically separated from the other processes, its belief states may be encoded in a subspace that is partially orthogonal to the shared P1--P2 subspace, making a single global linear probe less effective at capturing it. Paradoxically, this suggests that the nascent orthogonalization visible in the overlap analysis may actually \emph{hinder} linear readability for the most separated component.
+
+    \item \textbf{Belief readability peaks at Layer~0, not Layer~1.} This is the opposite of the predicted ``early routing, late refinement'' pattern. The drop from $R^2 = 0.929$ to $0.633$ is substantial. A plausible mechanistic explanation is that Layer~1 projects out the belief-state geometry to repurpose those dimensions for the output distribution computation. The residual stream after Layer~0 serves as a general-purpose representation; Layer~1 must compress it into a form that the unembedding matrix can map to next-token logits, and this transformation need not preserve the linear readability of intermediate quantities like belief states. This is a testable prediction: a logit-lens analysis should show that Layer~1's residual stream produces better-calibrated next-token distributions than Layer~0's, even as the belief states become less linearly accessible.
+
+    \item \textbf{The Bayesian posterior explains the weak routing.} The mean Bayes-optimal posterior confidence is only 0.586---even with perfect information, process identification from 15 tokens averages only ${\sim}59\%$ confidence. The three Mess3 processes produce heavily overlapping token distributions, making hard routing fundamentally unreliable. The model's strategy of maintaining parallel beliefs is the rational response to this ambiguity.
+\end{enumerate}
+
+%% FIGURE 4: Save from Colab:
+%%   The bar chart from Cell 15 (Per-Layer Probing: Routing vs. Belief Tracking)
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.65\textwidth]{per_layer_probe.png}
+    \caption{Per-layer probing: belief tracking peaks at Layer~0 ($R^2 = 0.93$) while process classification remains near chance at both layers. Dashed line indicates chance ($1/3$).}
+    \label{fig:per_layer}
+\end{figure}
+
+This reveals a fundamentally different solution from the one I predicted. Rather than the ``orthogonal subspaces'' hypothesis, the model adopts a strategy closer to \emph{dimensional reuse}---maintaining belief trajectories for all processes in a shared representational space, weighted implicitly by the Bayesian posterior. The high subspace overlaps in the next section corroborate this interpretation.
+
+\subsection{Within-Process Belief Geometry}
+
+The $R^2$ values confirm that belief states are linearly recoverable, but do not reveal whether the model has learned the characteristic \emph{geometric} structure of the Mess3 process---the triangular arrangement of predictive vectors on the 2-simplex that Shai et al.\ use as their primary visual signature (their Figure~2a). To test this, I projected each process's activations (from Layer~0, where $R^2$ is highest) onto their own top-2 principal components and colored points by $\text{argmax}\;\eta_k$---the most likely hidden state under that process's dynamics.
+
+%% FIGURE: Save from Colab:
+%%   The 3-panel within-process geometry plot (new Cell 18/19 output)
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=\textwidth]{within_process.png}
+    \caption{Within-process belief geometry at Layer~0. Each panel shows one process's activations projected onto its own top-2 PCA basis, colored by the most likely hidden state under that process's dynamics ($\text{argmax}\;\eta_k$). Triangular 2-simplex structure would manifest as three separated clusters.}
+    \label{fig:within_process}
+\end{figure}
+
+Figure~\ref{fig:within_process} shows the results. Where triangular structure has crystallized, three distinct clusters should appear corresponding to the three vertices of the Mess3 2-simplex. The degree to which this structure has or has not formed provides a direct window into the microscopic state-tracking question: the high $R^2$ tells us the model encodes belief-relevant information, but only the geometry reveals whether it has organized that information into the simplex structure predicted by the theory.
+
+\section{Additional Analysis: Layer-Wise Subspace Overlap}
+
+\subsection{Motivation}
+To quantify how the model organizes process-specific information geometrically, I computed the pairwise subspace overlap between the top-2 PCA subspaces of activations grouped by process ID. Following the metric in Shai et al.\ (Appendix H.2.2), overlap ranges from 0 (perfectly orthogonal) to 1 (fully overlapping).
+
+%% FIGURE 5: Save from Colab:
+%%   (a) = Layer 0 overlap heatmap from Cell 8 (first layer output)
+%%   (b) = Layer 1 overlap heatmap from Cell 8 (second layer output)
+\begin{figure}[h]
+    \centering
+    \begin{subfigure}{0.48\textwidth}
+        \includegraphics[width=\textwidth]{overlap_layer0.png}
+        \caption{Layer 0 Subspace Overlap}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}{0.48\textwidth}
+        \includegraphics[width=\textwidth]{overlap_layer1.png}
+        \caption{Layer 1 Subspace Overlap}
+    \end{subfigure}
+    \caption{Pairwise subspace overlap between ergodic components at each layer.}
+    \label{fig:overlap}
+\end{figure}
+
+\subsection{Results}
+The overlap analysis (Figure~\ref{fig:overlap}) reinforces the soft mixture interpretation:
+\begin{itemize}
+    \item All pairwise overlaps remain uniformly high (0.65--0.89), consistent with processes sharing representational space rather than being orthogonalized into distinct subspaces. This is the expected signature of dimensional reuse.
+    \item There is a modest asymmetry: P2--P3 has the lowest overlap (0.72 at Layer~0, 0.65 at Layer~1), while P1--P2 remains highest (0.89 $\to$ 0.81). The direction is consistent with the generative parameters---P1 and P2 share similar transition dynamics while P3 ($y=0$) is most distinctive---though the differences are not large enough to claim strong geometric isolation.
+    \item All overlaps decrease slightly from Layer~0 to Layer~1, suggesting a nascent trend toward orthogonalization that has not yet completed. Whether this trend would continue with longer training or deeper architectures remains an open question.
+\end{itemize}
+
+\section{Conclusion and Future Work}
+
+My pre-registered prediction---orthogonal subspaces with explicit routing---was wrong in an informative way. The model instead discovered a \emph{soft Bayesian mixture} strategy: maintaining belief trajectories under all process hypotheses simultaneously, without explicitly identifying the active process. This is the rational response to the inherent ambiguity of the non-ergodic mixture (mean Bayesian posterior confidence of only 59\%).
+
+This finding has a natural analogue in language models: when early context is ambiguous between domains, the model may maintain parallel hypotheses rather than committing to a hard routing decision. The orthogonal factored representation that Shai et al.\ observe for concurrent, conditionally independent factors does not straightforwardly emerge for mutually exclusive factors---likely because the conditional independence property (Definition~2.1 in the paper) does not hold for a non-ergodic mixture. Observing a token simultaneously updates both the process posterior and within-process beliefs in a coupled manner, preventing clean factorization.
+
+Given more time, I would: (1) train substantially longer to test whether the 28-dimensional representation eventually compresses toward 8 and whether orthogonal subspaces emerge under sustained gradient pressure; (2) vary the number and distinguishability of the Mess3 components to map the transition between soft mixture and hard routing strategies; and (3) perform attention pattern analysis to determine whether specific heads specialize in routing vs.\ belief tracking within the shallow architecture.
+
+\end{document}
