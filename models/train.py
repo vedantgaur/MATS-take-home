@@ -8,9 +8,6 @@ from tqdm import tqdm
 from data.mess3_generator import NonErgodicMess3Dataset, Mess3Process
 
 def get_toy_config(vocab_size: int = 3, d_model: int = 64, n_ctx: int = 16) -> HookedTransformerConfig:
-    """
-    Creates a configuration for a very small GPT-2 style model.
-    """
     return HookedTransformerConfig(
         n_layers=2,
         d_model=d_model,
